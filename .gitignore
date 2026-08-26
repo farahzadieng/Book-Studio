@@ -1,0 +1,7 @@
+models/*
+.venv/
+__pycache__/
+books/*
+data/*
+outputs/*
+Book_Podcast_Studio_*
