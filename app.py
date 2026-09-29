@@ -42,6 +42,7 @@ from werkzeug.utils import secure_filename
 
 BASE_DIR = Path(__file__).resolve().parent
 MODELS_DIR = BASE_DIR / "models"
+MODELS_CONFIG_PATH = BASE_DIR / "models.json"
 BOOKS_DIR = BASE_DIR / "books"
 OUTPUTS_DIR = BASE_DIR / "outputs"
 DATA_DIR = BASE_DIR / "data"
@@ -55,6 +56,17 @@ DEFAULT_CONTEXT = 8192
 CHUNK_TOKENS = 2600
 CHUNK_OVERLAP = 200
 APP_VERSION = "1.0.3-planning-recovery"
+
+MODEL_SLOTS = {
+    "analysis": "analysis_model",
+    "writing": "writing_model",
+    "fast": "fast_model",
+}
+MODEL_SLOT_FALLBACK_PATTERNS = {
+    "analysis": r"qwen2\.5.*14b",
+    "writing": r"gemma-3.*12b",
+    "fast": r"gemma-3.*4b",
+}
 
 for directory in (MODELS_DIR, BOOKS_DIR, OUTPUTS_DIR, DATA_DIR):
     directory.mkdir(parents=True, exist_ok=True)
@@ -313,34 +325,88 @@ def pause_requested(project_id: str) -> bool:
 # Model discovery and safe path handling
 # ---------------------------------------------------------------------------
 
+def load_model_config() -> dict[str, str]:
+    """Read models.json and return the configured path for each pipeline slot."""
+    if not MODELS_CONFIG_PATH.is_file():
+        return {}
+    try:
+        payload = json.loads(MODELS_CONFIG_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    configured = {}
+    for slot, key in MODEL_SLOTS.items():
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            configured[slot] = value.strip()
+    return configured
+
+
+def resolve_model(model_path: str) -> Path:
+    """Resolve a configured path, an absolute path, or a path inside models/."""
+    raw = Path(model_path).expanduser()
+    candidates = [raw] if raw.is_absolute() else [BASE_DIR / raw, MODELS_DIR / raw]
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        if resolved.suffix.lower() == ".gguf" and resolved.is_file():
+            return resolved
+    raise FileNotFoundError(f"GGUF model not found: {model_path}")
+
+
 def discover_models() -> list[dict[str, str]]:
-    models = []
-    for path in sorted(MODELS_DIR.rglob("*.gguf")):
+    """Configured models first, then every GGUF found under models/."""
+    models: list[dict[str, str]] = []
+    seen: set[Path] = set()
+    for configured in load_model_config().values():
         try:
-            relative = path.resolve().relative_to(MODELS_DIR.resolve())
-        except ValueError:
+            resolved = resolve_model(configured)
+        except FileNotFoundError:
             continue
-        models.append({"path": str(relative), "name": path.name})
+        if resolved not in seen:
+            seen.add(resolved)
+            models.append({"path": configured, "name": resolved.name})
+    for path in sorted(MODELS_DIR.rglob("*.gguf")):
+        resolved = path.resolve()
+        if resolved not in seen:
+            seen.add(resolved)
+            models.append({"path": str(resolved), "name": resolved.name})
     return models
+
+
+def missing_configured_models() -> list[dict[str, str]]:
+    return [
+        {"slot": slot, "path": configured}
+        for slot, configured in load_model_config().items()
+        if not _model_exists(configured)
+    ]
+
+
+def _model_exists(model_path: str) -> bool:
+    try:
+        resolve_model(model_path)
+    except FileNotFoundError:
+        return False
+    return True
 
 
 def choose_default_model(models: list[dict[str, str]], pattern: str) -> str:
     regex = re.compile(pattern, re.I)
     for model in models:
-        if regex.search(model["path"]):
+        if regex.search(model["name"]) or regex.search(model["path"]):
             return model["path"]
     return models[0]["path"] if models else ""
 
 
-def resolve_model(relative_path: str) -> Path:
-    candidate = (MODELS_DIR / relative_path).resolve()
-    try:
-        candidate.relative_to(MODELS_DIR.resolve())
-    except ValueError as exc:
-        raise ValueError("Model path escapes models directory") from exc
-    if candidate.suffix.lower() != ".gguf" or not candidate.is_file():
-        raise FileNotFoundError(f"GGUF model not found: {relative_path}")
-    return candidate
+def default_model_paths(models: list[dict[str, str]]) -> dict[str, str]:
+    """models.json wins; filename patterns pick a default when a slot is unset."""
+    available = {model["path"] for model in models}
+    configured = load_model_config()
+    defaults = {}
+    for slot, pattern in MODEL_SLOT_FALLBACK_PATTERNS.items():
+        chosen = configured.get(slot)
+        defaults[slot] = chosen if chosen in available else choose_default_model(models, pattern)
+    return defaults
 
 
 # ---------------------------------------------------------------------------
@@ -1515,16 +1581,12 @@ def index():
     token = session.get("csrf_token") or secrets.token_urlsafe(24)
     session["csrf_token"] = token
     models = discover_models()
-    defaults = {
-        "analysis": choose_default_model(models, r"qwen2\.5.*14b"),
-        "writing": choose_default_model(models, r"gemma-3.*12b"),
-        "fast": choose_default_model(models, r"gemma-3.*4b"),
-    }
     return render_template_string(
         INDEX_HTML,
         csrf_token=token,
         models=models,
-        defaults=defaults,
+        defaults=default_model_paths(models),
+        config_warnings=missing_configured_models(),
         app_version=APP_VERSION,
     )
 
@@ -1793,6 +1855,7 @@ INDEX_HTML = r'''<!doctype html>
     .hero h2 em { color: var(--blue); font-style: normal; }
     .hero-note { max-width: 245px; color: var(--muted); font-size: 13px; line-height: 1.55; border-left: 2px solid var(--amber); padding-left: 14px; }
     .panel { background: rgba(255,255,255,.93); border: 1px solid rgba(207,217,226,.9); border-radius: var(--radius); box-shadow: var(--shadow); }
+    .config-warning { margin: 0 0 16px; padding: 11px 13px; border: 1px solid #e6b6b3; border-radius: 9px; background: #fdf4f3; color: #8a3430; font-size: 12px; line-height: 1.5; }
     .upload-panel { padding: clamp(24px, 4vw, 44px); }
     .drop-zone { border: 1.5px dashed #9aabba; border-radius: 13px; padding: 34px; text-align: center; background: #f8fafc; transition: .2s ease; }
     .drop-zone.drag { border-color: var(--blue); background: #edf5fa; transform: translateY(-2px); }
@@ -1882,6 +1945,7 @@ INDEX_HTML = r'''<!doctype html>
 const CSRF = {{ csrf_token|tojson }};
 const MODELS = {{ models|tojson }};
 const DEFAULTS = {{ defaults|tojson }};
+const CONFIG_WARNINGS = {{ config_warnings|tojson }};
 const STAGES = ["UPLOADED","EXTRACTING","ANALYZING","PLANNING","DRAFTING","FACT_CHECKING","POLISHING","COMPLETED"];
 let activeId = null;
 let pollTimer = null;
@@ -1910,6 +1974,7 @@ function uploadView() {
       <div class="hero-note">The book is read in small evidence packets. A structured memory carries its argument—not an oversized context window.</div>
     </section>
     <form class="panel upload-panel" id="uploadForm">
+      ${CONFIG_WARNINGS.length ? `<div class="config-warning">${CONFIG_WARNINGS.map(w => `${escapeHTML(w.slot)}: ${escapeHTML(w.path)} is not a readable .gguf file`).join('<br>')}</div>` : ''}
       <div class="drop-zone" id="dropZone">
         <h3>Choose an English PDF or EPUB</h3>
         <p>Searchable PDFs only · up to 250 MB · processed locally</p>
