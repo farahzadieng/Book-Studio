@@ -1,5 +1,5 @@
 {
-  "analysis_model": "models/qwen2.5-14b-instruct-q4_k_m.gguf",
-  "writing_model": "models/gemma-3-12b-it-Q4_K_M.gguf",
-  "fast_model": "models/gemma-3-4b-it-Q4_K_M.gguf"
+  "analysis_model": "/Users/toranj/Documents/Local_AI/models/qwen2.5-14b-gguf/Qwen2.5-14B-Instruct-Q4_K_M.gguf",
+  "writing_model": "/Users/toranj/Documents/Local_AI/models/gemma-3-12b-it-gguf/google_gemma-3-12b-it-Q4_K_M.gguf",
+  "fast_model": "/Users/toranj/Documents/Local_AI/models/gemma-3-4b-it-gguf/google_gemma-3-4b-it-Q4_K_M.gguf"
 }
